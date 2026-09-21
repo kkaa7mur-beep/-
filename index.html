@@ -1,1 +1,161 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>نجف GPS - أقصر طريق</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}html,body,#map{margin:0;width:100%;height:100%;font-family:Tahoma,Arial,sans-serif}
+#map{height:100vh}
+.panel{position:fixed;z-index:1000;top:10px;right:10px;width:min(430px,calc(100% - 20px));background:#fff;border-radius:18px;padding:13px;box-shadow:0 6px 28px #0003}
+h2{margin:0 0 4px;font-size:19px}.sub{font-size:12px;color:#667085;margin-bottom:10px}
+.row{display:flex;gap:7px;margin:7px 0}input,button{height:45px;border-radius:11px;border:1px solid #d0d5dd;font-size:14px}
+input{width:100%;padding:0 11px}button{padding:0 12px;background:#fff;font-weight:bold;cursor:pointer}
+.primary{background:#1565d8;color:#fff;border-color:#1565d8}.dark{background:#111827;color:#fff;border-color:#111827}
+#status{padding:9px 11px;border-radius:10px;background:#eef4ff;color:#174ea6;font-size:12px;line-height:1.5}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px}.stat{background:#f8fafc;border-radius:10px;text-align:center;padding:8px}
+.stat span{font-size:11px;color:#667085}.stat b{display:block;font-size:16px;margin-top:2px}
+#results{display:none;margin-top:8px;max-height:150px;overflow:auto}.result{padding:9px;border-bottom:1px solid #eee;font-size:12px;cursor:pointer}
+#steps{display:none;max-height:150px;overflow:auto;margin-top:8px}.step{padding:7px;border-bottom:1px solid #eee;font-size:12px}
+.note{font-size:10px;color:#667085;margin-top:7px}
+@media(max-width:600px){.panel{top:7px;right:7px;width:calc(100% - 14px)}}
+</style>
+</head>
+<body>
+<div id="map"></div>
 
+<div class="panel">
+<h2>🧭 نجف GPS — أقصر طريق</h2>
+<div class="sub">يحسب أقصر مسافة فعلية على شبكة الطرق، وليس خطاً مستقيماً.</div>
+
+<div class="row">
+<input id="q" placeholder="اكتب وجهتك: شارع، منطقة، مستشفى، مرقد...">
+<button class="primary" onclick="search()">بحث</button>
+</div>
+<div id="results"></div>
+
+<div class="row">
+<button class="dark" onclick="locate()">📍 موقعي</button>
+<button class="primary" onclick="route()">🛣️ أقصر طريق</button>
+<button onclick="clearAll()">مسح</button>
+</div>
+
+<div class="stats">
+<div class="stat"><span>أقصر مسافة عبر الطريق</span><b id="dist">—</b></div>
+<div class="stat"><span>الوقت التقريبي</span><b id="time">—</b></div>
+</div>
+<div id="status">اضغط «موقعي» واسمح بصلاحية GPS.</div>
+<div id="steps"></div>
+<div class="note">الخرائط: OpenStreetMap — التوجيه: OSRM. اختيار الأقصر يعتمد على مسافة الطريق المتاحة من بيانات الطرق.</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map=L.map('map').setView([31.995,44.314],11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+ maxZoom:19,attribution:'© OpenStreetMap contributors'
+}).addTo(map);
+
+let me=null,dest=null,meMarker=null,destMarker=null,line=null,accuracy=null;
+const $=id=>document.getElementById(id);
+function msg(t,err=false){$('status').textContent=t;$('status').style.background=err?'#fff1f2':'#eef4ff';$('status').style.color=err?'#b42318':'#174ea6'}
+function fmtD(m){return m<1000?Math.round(m)+' م':(m/1000).toFixed(2)+' كم'}
+function fmtT(s){let m=Math.round(s/60);return m<60?m+' دقيقة':Math.floor(m/60)+' س '+(m%60)+' د'}
+
+function setMe(lat,lon,acc){
+ me={lat,lon};
+ if(!meMarker) meMarker=L.marker([lat,lon]).addTo(map).bindPopup('📍 موقعك');
+ else meMarker.setLatLng([lat,lon]);
+ if(!accuracy) accuracy=L.circle([lat,lon],{radius:acc||20,color:'#1565d8',fillOpacity:.08}).addTo(map);
+ else {accuracy.setLatLng([lat,lon]);accuracy.setRadius(acc||20)}
+}
+
+function locate(){
+ if(!navigator.geolocation){msg('هذا المتصفح لا يدعم GPS.',true);return}
+ msg('⏳ جاري تحديد موقعك...');
+ navigator.geolocation.getCurrentPosition(p=>{
+  setMe(p.coords.latitude,p.coords.longitude,p.coords.accuracy);
+  map.setView([p.coords.latitude,p.coords.longitude],15);
+  msg('✅ تم تحديد موقعك. اختر الوجهة الآن.');
+ },e=>{
+  msg(e.code===1?'❌ تم رفض الموقع. فعّل إذن الموقع للمتصفح ثم حاول مرة ثانية.':'❌ تعذر تحديد الموقع. تأكد من تشغيل GPS.',true);
+ },{enableHighAccuracy:true,timeout:20000,maximumAge:3000});
+}
+
+async function search(){
+ let q=$('q').value.trim(); if(!q)return;
+ msg('🔎 أبحث عن المكان...');
+ $('results').style.display='none';
+ try{
+  let u='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&countrycodes=iq&accept-language=ar&q='+encodeURIComponent(q+', النجف، العراق');
+  let r=await fetch(u);let d=await r.json();
+  if(!d.length){msg('لم أجد المكان. جرّب اسم الشارع أو المنطقة بشكل أوضح.',true);return}
+  $('results').innerHTML='';
+  d.forEach(x=>{
+   let el=document.createElement('div');el.className='result';el.textContent=x.display_name;
+   el.onclick=()=>{
+    dest={lat:+x.lat,lon:+x.lon,name:x.display_name};$('q').value=x.display_name;$('results').style.display='none';
+    if(!destMarker)destMarker=L.marker([dest.lat,dest.lon]).addTo(map);else destMarker.setLatLng([dest.lat,dest.lon]);
+    destMarker.bindPopup('🎯 '+dest.name).openPopup();
+    if(me)route();else{map.setView([dest.lat,dest.lon],15);msg('تم اختيار الوجهة. اضغط «موقعي».')}
+   };$('results').appendChild(el);
+  });$('results').style.display='block';msg('اختر المكان الصحيح من النتائج.');
+ }catch(e){msg('تعذر البحث. تأكد من الإنترنت.',true)}
+}
+
+async function route(){
+ if(!me){msg('حدد موقعك أولاً.',true);return}
+ if(!dest){msg('ابحث عن وجهتك أولاً أو اضغط على الخريطة.',true);return}
+ msg('🧭 أحسب أقصر مسافة عبر الطرق...');
+ let u=`https://router.project-osrm.org/route/v1/driving/${me.lon},${me.lat};${dest.lon},${dest.lat}?overview=full&geometries=geojson&steps=true&alternatives=true`;
+ try{
+  let r=await fetch(u);let d=await r.json();
+  if(d.code!=='Ok'||!d.routes?.length)throw 0;
+
+  // نختار المسار ذو أقل distance فعلياً.
+  let routes=[...d.routes].sort((a,b)=>a.distance-b.distance);
+  let best=routes[0];
+
+  if(line)map.removeLayer(line);
+  line=L.geoJSON(best.geometry,{style:{weight:8,opacity:.9}}).addTo(map);
+  map.fitBounds(line.getBounds(),{padding:[65,65]});
+  $('dist').textContent=fmtD(best.distance);
+  $('time').textContent=fmtT(best.duration);
+  renderSteps(best.legs?.[0]?.steps||[]);
+  msg(`✅ أقصر مسار متاح: ${fmtD(best.distance)} — ${fmtT(best.duration)}`);
+ }catch(e){msg('تعذر حساب الطريق حالياً. حاول مرة ثانية.',true)}
+}
+
+function renderSteps(a){
+ $('steps').innerHTML='';
+ a.forEach((s,i)=>{
+  let type=s.maneuver?.type,mod=s.maneuver?.modifier;
+  let t=type==='depart'?'انطلق':type==='arrive'?'وصلت إلى الوجهة':
+        type==='turn'?(mod==='left'?'انعطف يساراً':mod==='right'?'انعطف يميناً':'انعطف'):
+        type==='roundabout'?'ادخل الدوار':'استمر';
+  let road=s.name?' — '+s.name:'';
+  let el=document.createElement('div');el.className='step';
+  el.textContent=`${i+1}. ${t}${road} (${fmtD(s.distance||0)})`;
+  $('steps').appendChild(el);
+ });
+ $('steps').style.display=a.length?'block':'none';
+}
+
+function clearAll(){
+ if(line){map.removeLayer(line);line=null}
+ if(destMarker){map.removeLayer(destMarker);destMarker=null}
+ dest=null;$('q').value='';$('dist').textContent='—';$('time').textContent='—';
+ $('steps').style.display='none';$('results').style.display='none';msg('تم مسح المسار.');
+}
+
+map.on('click',e=>{
+ dest={lat:e.latlng.lat,lon:e.latlng.lng,name:'الموقع المحدد على الخريطة'};
+ if(!destMarker)destMarker=L.marker(e.latlng).addTo(map);else destMarker.setLatLng(e.latlng);
+ destMarker.bindPopup('🎯 الوجهة').openPopup();
+ if(me)route();else msg('تم اختيار الوجهة. اضغط «موقعي».');
+});
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+</script>
+</body>
+</html>
